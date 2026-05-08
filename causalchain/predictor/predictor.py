@@ -21,7 +21,11 @@ class CausalPredictor:
     def predict(self) -> list[dict[str, Any]]:
         """Return potential next incidents based on partial pattern matches."""
         since = utc_now() - self.lookback
-        recent = self.db.list_nodes(since)
+        recent = [
+            node
+            for node in self.db.list_nodes(since)
+            if node.type not in {"business_metric", "agent_action", "prediction"}
+        ]
         predictions: list[dict[str, Any]] = []
         for pattern in self.db.list_patterns():
             prefix_length = self._matching_prefix([node.type for node in recent], pattern.node_sequence)
@@ -57,4 +61,3 @@ class CausalPredictor:
             "recent_event_count": len(nodes),
             "sources": sorted({node.source for node in nodes}),
         }
-

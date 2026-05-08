@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -10,14 +11,24 @@ from typing import Any
 
 import click
 
+from causalchain.agents import ResponseCoordinator
+from causalchain.alerting import PredictiveAlertEngine
 from causalchain.core.db import CausalChainDB
 from causalchain.core.models import Incident, serialize_timestamp, utc_now
 from causalchain.graph.analyzer import CausalGraphAnalyzer
 from causalchain.graph.builder import CausalGraphBuilder
 from causalchain.investigator import IncidentInvestigator
 from causalchain.learner import IncidentLearner
+from causalchain.metrics import BusinessMetricCorrelator
 from causalchain.narrator import NarrativeGenerator
+from causalchain.patterns import IncidentPatternLibrary
+from causalchain.postmortem import BlamelessPostmortemGenerator
 from causalchain.predictor import CausalPredictor
+from causalchain.realtime import RealTimeCausalGraph
+from causalchain.timeline import TimelineReconstructor
+from causalchain.tracing import OpenTelemetryIngestor
+from causalchain.visualization import GraphVisualizationExporter
+from causalchain.whatif import WhatIfSimulator
 
 
 def db_path() -> str:
@@ -97,6 +108,49 @@ def predict() -> None:
         db.close()
 
 
+@cli.command("alerts")
+def alerts() -> None:
+    """Show predictive incident alerts."""
+    db = open_db()
+    try:
+        rows = PredictiveAlertEngine(db).alerts()
+        if not rows:
+            click.secho("No predictive alerts from current causal state.", fg="green")
+            return
+        for row in rows:
+            click.secho(f"{row['severity']} {row['pattern_name']} ({row['confidence']:.2f})", fg="yellow")
+            click.echo(row["message"])
+    finally:
+        db.close()
+
+
+@cli.command("trace-ingest")
+@click.argument("path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def trace_ingest(path: Path) -> None:
+    """Ingest OpenTelemetry JSON traces."""
+    db = open_db()
+    try:
+        result = OpenTelemetryIngestor(db).ingest(json.loads(path.read_text()))
+        click.secho(f"Ingested {len(result['nodes'])} spans and {len(result['edges'])} trace edges", fg="green")
+    finally:
+        db.close()
+
+
+@cli.command("whatif")
+@click.option("--action", required=True)
+@click.option("--target")
+def whatif(action: str, target: str | None) -> None:
+    """Simulate a hypothetical mitigation action."""
+    db = open_db()
+    try:
+        result = WhatIfSimulator(db).simulate(action, target)
+        click.secho(result["recommendation"], fg="cyan")
+        click.echo(f"risk_reduction={result['estimated_risk_reduction']:.2f}")
+        click.echo(f"affected_services={', '.join(result['affected_services'])}")
+    finally:
+        db.close()
+
+
 @cli.command()
 def patterns() -> None:
     """Show learned causal patterns."""
@@ -113,6 +167,17 @@ def patterns() -> None:
         db.close()
 
 
+@cli.command("install-patterns")
+def install_patterns() -> None:
+    """Install built-in incident patterns and playbooks."""
+    db = open_db()
+    try:
+        installed = IncidentPatternLibrary(db).install_builtins()
+        click.secho(f"Installed {len(installed)} built-in patterns", fg="green")
+    finally:
+        db.close()
+
+
 @cli.command()
 @click.option("--incident", "incident_id", required=True)
 def narrative(incident_id: str) -> None:
@@ -124,17 +189,60 @@ def narrative(incident_id: str) -> None:
         db.close()
 
 
+@cli.command("postmortem")
+@click.option("--incident", "incident_id", required=True)
+def postmortem(incident_id: str) -> None:
+    """Generate a v2 blameless postmortem."""
+    db = open_db()
+    try:
+        click.echo(BlamelessPostmortemGenerator(db).generate(incident_id))
+    finally:
+        db.close()
+
+
+@cli.command("timeline")
+@click.option("--incident", "incident_id", required=True)
+def timeline(incident_id: str) -> None:
+    """Reconstruct a minute-by-minute incident timeline."""
+    db = open_db()
+    try:
+        for bucket in TimelineReconstructor(db).reconstruct(incident_id):
+            click.secho(bucket["minute"], fg="cyan")
+            for event in bucket["events"]:
+                click.echo(f"- {event['source']} {event['type']}: {event['description']}")
+    finally:
+        db.close()
+
+
+@cli.command("coordinate")
+@click.option("--incident", "incident_id", required=True)
+def coordinate(incident_id: str) -> None:
+    """Coordinate response agents for an incident."""
+    db = open_db()
+    try:
+        for action in ResponseCoordinator(db).coordinate(incident_id):
+            click.echo(f"{action['action']} {action['target']}: {action['reason']}")
+    finally:
+        db.close()
+
+
 @cli.command()
 @click.option("--dot", is_flag=True)
-def graph(dot: bool) -> None:
+@click.option("--html", "html_export", is_flag=True)
+@click.option("--ascii", "ascii_export", is_flag=True)
+def graph(dot: bool, html_export: bool, ascii_export: bool) -> None:
     """Export causal graph."""
     db = open_db()
     try:
-        analyzer = CausalGraphAnalyzer(db)
+        exporter = GraphVisualizationExporter(db)
         if dot:
-            click.echo(analyzer.to_dot())
+            click.echo(exporter.dot())
+        elif html_export:
+            click.echo(exporter.html())
+        elif ascii_export:
+            click.echo(exporter.ascii())
         else:
-            click.echo(analyzer.graph_json())
+            click.echo(CausalGraphAnalyzer(db).graph_json())
     finally:
         db.close()
 
@@ -153,6 +261,7 @@ def demo() -> None:
     """Run a built-in demo incident."""
     db = CausalChainDB(":memory:")
     builder = CausalGraphBuilder(db, time_window_minutes=20)
+    IncidentPatternLibrary(db).install_builtins()
     base = utc_now()
     events: list[tuple[str, str, str, dict[str, Any]]] = [
         ("deploy", "api-gateway", "Deploy v2.3.1 added an unindexed query", {"version": "2.3.1"}),
@@ -176,6 +285,41 @@ def demo() -> None:
         for edge in edges[:2]:
             click.echo(f"  edge: {edge.edge_type} confidence={edge.confidence:.2f} evidence={edge.evidence['reason']}")
 
+    trace_payload = {
+        "resourceSpans": [
+            {
+                "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "checkout-service"}}]},
+                "scopeSpans": [
+                    {
+                        "spans": [
+                            {
+                                "traceId": "trace-demo",
+                                "spanId": "span-root",
+                                "name": "POST /checkout",
+                                "startTimeUnixNano": str(int((base + timedelta(minutes=2)).timestamp() * 1_000_000_000)),
+                                "endTimeUnixNano": str(int((base + timedelta(minutes=2, seconds=2)).timestamp() * 1_000_000_000)),
+                            },
+                            {
+                                "traceId": "trace-demo",
+                                "spanId": "span-pay",
+                                "parentSpanId": "span-root",
+                                "name": "charge payment",
+                                "status": {"code": "STATUS_CODE_ERROR"},
+                                "startTimeUnixNano": str(int((base + timedelta(minutes=2, seconds=1)).timestamp() * 1_000_000_000)),
+                                "endTimeUnixNano": str(int((base + timedelta(minutes=2, seconds=6)).timestamp() * 1_000_000_000)),
+                            },
+                        ]
+                    }
+                ],
+            }
+        ]
+    }
+    trace_result = OpenTelemetryIngestor(db, builder).ingest(trace_payload)
+    live_updates: list[dict[str, Any]] = []
+    live = RealTimeCausalGraph(db)
+    live.subscribe(live_updates.append)
+    live.ingest_event("metric_anomaly", "checkout-service", "Checkout queue depth still elevated", base + timedelta(minutes=10), {"metric": "queue_depth"})
+
     since = serialize_timestamp(base - timedelta(seconds=1))
     result = IncidentInvestigator(db).investigate(since, ["api-gateway", "payment-service", "load-balancer"])
     incident_data = result["incident"]
@@ -183,8 +327,12 @@ def demo() -> None:
     incident.status = "resolved"
     incident.resolved_at = base + timedelta(minutes=len(events) + 2)
     db.add_incident(incident)
+    BusinessMetricCorrelator(db).ingest_metric("conversion", 850, 1000, "checkout", base + timedelta(minutes=4), 31.33)
     pattern = IncidentLearner(db).learn_from_incident(incident)
     narrative_text = NarrativeGenerator(db).generate(incident.id)
+    whatif_result = WhatIfSimulator(db).simulate("rollback_deploy", "2.3.1")
+    postmortem_text = BlamelessPostmortemGenerator(db).generate(incident.id)
+    agent_actions = ResponseCoordinator(db).coordinate(incident.id)
 
     click.secho("\nInvestigation", fg="cyan", bold=True)
     click.echo(f"Confidence: {result['confidence']:.2f}")
@@ -193,8 +341,16 @@ def demo() -> None:
         click.echo(f"- {node['source']} {node['type']}: {node['description']}")
     if pattern:
         click.secho(f"\nLearned pattern: {pattern.name} ({pattern.confidence:.2f})", fg="yellow")
+    click.secho("\nv2.0 capabilities", fg="cyan", bold=True)
+    click.echo(f"OpenTelemetry spans ingested: {len(trace_result['nodes'])}")
+    click.echo(f"Live graph updates published: {len(live_updates)}")
+    click.echo(f"What-if rollback risk reduction: {whatif_result['estimated_risk_reduction']:.2f}")
+    click.echo(f"Coordinated actions: {', '.join(action['action'] for action in agent_actions)}")
+    click.echo(f"ASCII graph lines: {len(GraphVisualizationExporter(db).ascii().splitlines())}")
     click.secho("\nNarrative postmortem", fg="cyan", bold=True)
     click.echo(narrative_text)
+    click.secho("\nBlameless v2 postmortem", fg="cyan", bold=True)
+    click.echo(postmortem_text)
     db.close()
 
 

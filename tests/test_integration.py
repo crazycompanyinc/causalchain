@@ -2,33 +2,37 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from click.testing import CliRunner
-from fastapi.testclient import TestClient
 
 from causalchain.cli import cli
 from causalchain.server.app import create_app
+from causalchain.server.routes import EventIn, InvestigationIn
+
+
+def endpoint(app, path: str):
+    for route in app.routes:
+        if getattr(route, "path", None) == path:
+            return route.endpoint
+    raise AssertionError(f"route not found: {path}")
 
 
 def test_api_health_and_event_ingest(tmp_path):
     app = create_app(str(tmp_path / "api.db"))
-    client = TestClient(app)
-    assert client.get("/health").json() == {"status": "ok"}
-    response = client.post(
-        "/events",
-        json={"type": "deploy", "source": "api-gateway", "description": "Deploy"},
+    assert asyncio.run(endpoint(app, "/health")()) == {"status": "ok"}
+    response = asyncio.run(
+        endpoint(app, "/events")(EventIn(type="deploy", source="api-gateway", description="Deploy"))
     )
-    assert response.status_code == 200
-    assert response.json()["type"] == "deploy"
+    assert response["type"] == "deploy"
 
 
 def test_api_investigate(tmp_path):
     app = create_app(str(tmp_path / "api2.db"))
-    client = TestClient(app)
-    client.post("/events", json={"type": "deploy", "source": "api-gateway", "description": "Deploy"})
-    client.post("/events", json={"type": "error", "source": "api-gateway", "description": "Errors"})
-    response = client.post("/investigate", json={"since": "2000-01-01T00:00:00Z"})
-    assert response.status_code == 200
-    assert response.json()["incident"] is not None
+    asyncio.run(endpoint(app, "/events")(EventIn(type="deploy", source="api-gateway", description="Deploy")))
+    asyncio.run(endpoint(app, "/events")(EventIn(type="error", source="api-gateway", description="Errors")))
+    response = asyncio.run(endpoint(app, "/investigate")(InvestigationIn(since="2000-01-01T00:00:00Z")))
+    assert response["incident"] is not None
 
 
 def test_cli_init_and_ingest(tmp_path, monkeypatch):

@@ -15,6 +15,10 @@ VALID_NODE_TYPES = {
     "config_change",
     "traffic_spike",
     "recovery",
+    "trace_span",
+    "business_metric",
+    "agent_action",
+    "prediction",
 }
 
 VALID_EDGE_TYPES = {
@@ -23,6 +27,9 @@ VALID_EDGE_TYPES = {
     "correlates_with",
     "blocks",
     "degrades",
+    "propagates_to",
+    "impacts",
+    "mitigates",
 }
 
 VALID_SEVERITIES = {"low", "medium", "high", "critical"}
@@ -153,4 +160,3 @@ class Incident:
         self.resolved_at = parse_timestamp(self.resolved_at) if self.resolved_at else None
         if self.resolved_at and self.resolved_at < self.started_at:
             raise ValueError("resolved_at cannot be earlier than started_at")
-
